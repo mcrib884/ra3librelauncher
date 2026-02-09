@@ -1,0 +1,57 @@
+# Build outputs
+dist/
+bin/
+obj/
+build/
+out/
+
+# .NET
+*.user
+*.suo
+*.cache
+*.vs/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# C++
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Release/build outputs
+release/
+
+# Warp agent
+.agent/
+
+# vcpkg
+vcpkg_installed/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Config files (user-generated)
+config.json
+server.ini

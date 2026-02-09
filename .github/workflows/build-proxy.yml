@@ -1,0 +1,134 @@
+name: Build Proxy DLL (winmm.dll)
+
+on:
+  push:
+    paths:
+      - 'hook/**'
+      - '.github/workflows/build-proxy.yml'
+  workflow_dispatch:
+
+env:
+  VCPKG_ROOT: C:\vcpkg
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Set up MSVC x86 (32-bit) developer environment — RA3 is a 32-bit game
+    - name: Setup MSVC x86
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+
+    # =========================================================
+    # OpenSSL 1.0.2u — required because RA3 uses SSLv3 + RC4
+    # Modern OpenSSL removed these APIs, so we must build the
+    # legacy version from source.
+    # =========================================================
+    - name: Cache OpenSSL 1.0.2u
+      id: cache-openssl
+      uses: actions/cache@v4
+      with:
+        path: C:\openssl-102u
+        key: openssl-1.0.2u-vc-win32-v1
+
+    - name: Build OpenSSL 1.0.2u
+      if: steps.cache-openssl.outputs.cache-hit != 'true'
+      shell: cmd
+      run: |
+        curl -fSL -o openssl-1.0.2u.tar.gz https://www.openssl.org/source/old/1.0.2/openssl-1.0.2u.tar.gz
+        tar xzf openssl-1.0.2u.tar.gz
+        cd openssl-1.0.2u
+        perl Configure VC-WIN32 no-asm --prefix=C:/openssl-102u
+        call ms\do_ms.bat
+        nmake -f ms\nt.mak
+        nmake -f ms\nt.mak install
+
+    # =========================================================
+    # vcpkg — boost and detours dependencies
+    # Uses manifest mode (vcpkg.json in the project)
+    # =========================================================
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
+      with:
+        path: hook/ra3_game_proxy/vcpkg_installed
+        key: vcpkg-manifest-x86-win-${{ hashFiles('hook/ra3_game_proxy/vcpkg.json') }}
+
+    - name: Ensure vcpkg.json has baseline
+      shell: pwsh
+      run: |
+        $jsonPath = "hook/ra3_game_proxy/vcpkg.json"
+        $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
+        if (-not $json.'builtin-baseline') {
+          $baseline = & git -C $env:VCPKG_ROOT rev-parse HEAD
+          $json | Add-Member -NotePropertyName 'builtin-baseline' -NotePropertyValue $baseline -Force
+          $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -Encoding utf8NoBOM
+          Write-Host "Added vcpkg baseline: $baseline"
+        }
+
+    - name: Integrate vcpkg with MSBuild
+      shell: cmd
+      run: "%VCPKG_ROOT%\vcpkg" integrate install
+
+    # =========================================================
+    # Build — MSBuild with OpenSSL 1.0.2u injected via
+    # ForceImportAfterCppTargets so our legacy headers/libs
+    # take precedence over any modern OpenSSL from vcpkg.
+    # =========================================================
+    - name: Create OpenSSL build props
+      shell: pwsh
+      run: |
+        @"
+        <?xml version="1.0" encoding="utf-8"?>
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <ItemDefinitionGroup>
+            <ClCompile>
+              <AdditionalIncludeDirectories>C:\openssl-102u\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+            </ClCompile>
+            <Link>
+              <AdditionalLibraryDirectories>C:\openssl-102u\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+              <AdditionalDependencies>crypt32.lib;advapi32.lib;gdi32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+            </Link>
+          </ItemDefinitionGroup>
+        </Project>
+        "@ | Out-File -FilePath C:\openssl.props -Encoding utf8
+
+    - name: Build ra3-proxy (Release|Win32)
+      shell: cmd
+      run: |
+        msbuild hook\ra3_game_proxy\ra3-proxy.sln ^
+          /p:Configuration=Release ^
+          /p:Platform=Win32 ^
+          /p:ForceImportAfterCppTargets=C:\openssl.props ^
+          /m
+
+    # =========================================================
+    # Artifact — find and upload the built DLL
+    # =========================================================
+    - name: Collect build output
+      shell: pwsh
+      run: |
+        $dll = Get-ChildItem -Path hook\ra3_game_proxy -Recurse -Filter "winmm.dll" |
+               Where-Object { $_.FullName -match 'Release' } |
+               Select-Object -First 1
+        if (-not $dll) {
+          Write-Error "winmm.dll not found after build!"
+          Write-Host "Build tree:"
+          Get-ChildItem -Path hook\ra3_game_proxy -Recurse | Format-Table FullName
+          exit 1
+        }
+        New-Item -Path artifact -ItemType Directory -Force | Out-Null
+        Copy-Item $dll.FullName artifact\
+        $pdb = Join-Path $dll.DirectoryName "winmm.pdb"
+        if (Test-Path $pdb) { Copy-Item $pdb artifact\ }
+        Write-Host "Collected: $($dll.FullName)"
+
+    - name: Upload winmm.dll
+      uses: actions/upload-artifact@v4
+      with:
+        name: winmm-proxy-dll
+        path: artifact/
